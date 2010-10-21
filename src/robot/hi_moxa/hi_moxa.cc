@@ -1,7 +1,4 @@
-//#include "robot/sarkofag/edp_e_sarkofag.h"
 #include "robot/hi_moxa/hi_moxa.h"
-
-//#include "hi_sarkofag.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -48,22 +45,44 @@ void HI_moxa::init()
 #ifdef T_INFO_FUNC
 	std::cout << "[func] HI_moxa::init()" << std::endl;
 #endif
-
 	// inicjalizacja zmiennych
 	for (unsigned int i = first_drive_number; i <= last_drive_number; i++) {
 		servo_data[i].first_hardware_read = true;
 		servo_data[i].command_params = 0;
+		for(int j=0; j<SERVO_ST_BUF_LEN; j++)
+			servo_data[i].buf[j] = 0;
 	}
+
+	// informacja o stanie robota
+	master.controller_state_edp_buf.is_power_on = true;
+	master.controller_state_edp_buf.is_robot_blocked = false;
+
+	if (master.robot_test_mode) {
+		// domyslnie robot jest zsynchronizowany
+		master.controller_state_edp_buf.is_synchronised = true;
+		// informacja o stanie robota
+		master.controller_state_edp_buf.is_power_on = true;
+		master.controller_state_edp_buf.is_robot_blocked = false;
+
+		clock_gettime(CLOCK_MONOTONIC, &wake_time);
+		reset_counters();
+		return;
+	} // end test mode
+
+	// domyslnie robot nie jest zsynchronizowany
+	master.controller_state_edp_buf.is_synchronised = false;
+
+
 
 	fd_max = 0;
 	for (unsigned int i = first_drive_number; i <= last_drive_number; i++) {
 		std::cout << "[info] opening port : " << (port + (char) (i + INIT_PORT_CHAR)).c_str();
 		fd[i] = open((port + (char) (i + INIT_PORT_CHAR)).c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
 		if (fd[i] < 0) {
-			//	throw(std::runtime_error("unable to open device!!!"));
-			std::cout << std::endl << "[error] fd == " << (int) fd[i] << std::endl;
+			std::cout << std::endl << "[error] Nie wykryto sprzetu! fd == " << (int) fd[i] << std::endl;
+			//throw(std::runtime_error("unable to open device!!!"));
 		} else {
-			std::cout << "...OK (" << (int) fd[i] << ")" << std::endl;
+			std::cout << "...OK" << std::endl;
 			if (fd[i] > fd_max)
 				fd_max = fd[i];
 		}
@@ -87,7 +106,6 @@ void HI_moxa::init()
 		tcflush(fd[i], TCIFLUSH);
 		tcsetattr(fd[i], TCSANOW, &newtio);
 	}
-	std::cout << "[info] fd_max: " << fd_max << std::endl;
 
 	clock_gettime(CLOCK_MONOTONIC, &wake_time);
 
@@ -105,7 +123,7 @@ void HI_moxa::insert_set_value(int drive_offset, double set_value)
 	servo_data[drive_number].buf[4] = START_BYTE;
 	servo_data[drive_number].buf[5] = COMMAND_MODE_PWM | servo_data[drive_number].command_params;
 	struct pwm_St* temp = (pwm_St*) &(servo_data[drive_number].buf[6]);
-	//temp->pwm = set_value * (300.0 / 255.0);
+	// Nowa karta sterownika: -1000..+1000, stara karta: -255..+255
 	temp->pwm = set_value * (1000.0 / 255.0);
 
 #ifdef T_INFO_FUNC
@@ -160,25 +178,25 @@ uint64_t HI_moxa::read_write_hardware(void)
 	fd_set rfds;
 	uint64_t ret = 0;
 	uint8_t drive_number;
+	static int status_disp_cnt = 0;
 
-	//	std::cout << "[info] pos:";													// ############# Pozycja
-	//	 for(drive_number = first_drive_number; drive_number <= last_drive_number; drive_number++){
-	//	 std::cout << " " << servo_data[drive_number].current_absolute_position;
-	//	 }
-	//	 std::cout << std::endl;
-
-	//	std::cout << "[info] przed write: " << std::endl;
+	// test mode
+	if (master.robot_test_mode) {
+		while ((wake_time.tv_nsec += COMMCYCLE_TIME_NS) > 1000000000) {
+			wake_time.tv_sec += 1;
+			wake_time.tv_nsec -= 1000000000;
+		}
+		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wake_time, NULL);
+		return ret;
+	}// end test mode
 
 	for (drive_number = first_drive_number; drive_number <= last_drive_number; drive_number++) {
 		write(fd[drive_number], servo_data[drive_number].buf, WRITE_BYTES);
 		bytes_received[drive_number] = 0;
 	}
 
-	//	std::cout << "[info] po write: " << std::endl;
-
-
 	receive_attempts++;
-	//for (int i = 0; i < 7; i++)
+
 	while (1) {
 		FD_ZERO(&rfds);
 		for (drive_number = first_drive_number; drive_number <= last_drive_number; drive_number++) {
@@ -187,33 +205,20 @@ uint64_t HI_moxa::read_write_hardware(void)
 			}
 		}
 
-		// timeout
 		struct timeval timeout;
 		timeout.tv_sec = (time_t) 0;
 		timeout.tv_usec = 500;
 		int select_retval = select(fd_max + 1, &rfds, NULL, NULL, &timeout);
 		if (select_retval == 0) {
 			receive_timeouts++;
-			if (!master.robot_test_mode) {
-				std::cout << "[error] communication timeout (" << receive_timeouts << "/" << receive_attempts << "="
-						<< (((float) receive_timeouts) / receive_attempts) << ")";
+			std::cout << "[error] communication timeout (" << receive_timeouts << "/" << receive_attempts << "="
+					<< (((float) receive_timeouts) / receive_attempts) << ")";
 
-				//<< std::endl;
-
-				//throw(std::runtime_error("communication timeout !!!"));
-				/*std::cout << "[error] communication timeout ("
-				 << ++receive_timeouts << "/" << receive_attempts << "="
-				 << ((float) receive_timeouts / receive_attempts) << ")";
-				 //					<< std::endl;*/
-
-				for (drive_number = first_drive_number; drive_number <= last_drive_number; drive_number++) {
-					if (bytes_received[drive_number] < READ_BYTES)
-						std::cout << " " << (int) drive_number << "(" << READ_BYTES - bytes_received[drive_number]
-								<< ")";
-				}
-				std::cout << std::endl;
+			for (drive_number = first_drive_number; drive_number <= last_drive_number; drive_number++) {
+				if (bytes_received[drive_number] < READ_BYTES)
+					std::cout << " " << (int) drive_number << "(" << READ_BYTES - bytes_received[drive_number] << ")";
 			}
-
+			std::cout << std::endl;
 			hardware_read_ok = false;
 			break;
 		} else {
@@ -228,18 +233,9 @@ uint64_t HI_moxa::read_write_hardware(void)
 					all_hardware_read = false;
 				}
 			}
-			//		std::cout << all_hardware_read << std::endl;	//############################
 			if (all_hardware_read) {
 				break;
 			}
-			//			else{
-			//			 for(drive_number = first_drive_number; drive_number <= last_drive_number; drive_number++) {
-			//			 if(bytes_received[drive_number] < READ_BYTES){
-			//			 std::cout << "Waiting for " << (int)drive_number << std::endl;	//############################
-			//			 }
-			//			 }
-			//			 }
-			//			std::cout << std::endl;	//############################
 		}
 	}
 
@@ -262,24 +258,18 @@ uint64_t HI_moxa::read_write_hardware(void)
 				- servo_data[drive_number].previous_absolute_position);
 	}
 
-	robot_synchronized = false;
+	robot_synchronized = true;
 	power_fault = false;
 	for (drive_number = first_drive_number; drive_number <= last_drive_number; drive_number++) {
 		if (servo_data[drive_number].drive_status.powerStageFault != 0) {
 			power_fault = true;
 		}
-		if (servo_data[drive_number].drive_status.isSynchronized != 0) {
-			robot_synchronized = true;
+		if (servo_data[drive_number].drive_status.isSynchronized == 0) {
+			robot_synchronized = false;
 		}
 	}
 
-	//zeby zbik3d ruszyl
-	if (!master.robot_test_mode) {
-		master.controller_state_edp_buf.is_synchronised = robot_synchronized;
-	} else {
-		master.controller_state_edp_buf.is_synchronised = true;
-	}
-
+	master.controller_state_edp_buf.is_synchronised = robot_synchronized;
 	master.controller_state_edp_buf.is_robot_blocked = power_fault;
 	if (power_fault) {
 		if (error_msg_power_stage == 0) {
@@ -304,6 +294,12 @@ uint64_t HI_moxa::read_write_hardware(void)
 			ret |= (uint64_t) (OVER_CURRENT << (5 * (drive_number - first_drive_number))); // Przekroczenie dopuszczalnego pradu
 	}
 
+	if(status_disp_cnt++ == STATUS_DISP_T)
+	{
+	//	std::cout << "[info] current[0] = " << (int) servo_data[0].drive_status.current << std::endl;
+		status_disp_cnt = 0;
+	}
+
 	while ((wake_time.tv_nsec += COMMCYCLE_TIME_NS) > 1000000000) {
 		wake_time.tv_sec += 1;
 		wake_time.tv_nsec -= 1000000000;
@@ -312,6 +308,79 @@ uint64_t HI_moxa::read_write_hardware(void)
 	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wake_time, NULL);
 
 	return ret;
+}
+
+int HI_moxa::set_parameter(int drive_offset, const int parameter, uint32_t new_value)
+{
+	char tx_buf[SERVO_ST_BUF_LEN];
+	char rx_buf[SERVO_ST_BUF_LEN];
+	fd_set rfds;
+	int drive_number;
+	int param_set_attmempt=0, bytes_received=0;
+
+	drive_number = first_drive_number + drive_offset;
+
+	tx_buf[0] = 0x00;
+	tx_buf[1] = 0x00;
+	tx_buf[2] = 0x00;
+	tx_buf[3] = 0x00;
+	tx_buf[4] = START_BYTE;
+	tx_buf[5] = COMMAND_SET_PARAM | parameter;
+	union param_Un* temp = (param_Un*) &(tx_buf[6]);
+	temp->largest = 0;
+
+	switch(parameter)
+	{
+	case PARAM_SYNCHRONIZED:
+		temp->synchronized = new_value;
+	break;
+	case PARAM_MAXCURRENT:
+		temp->maxcurrent = new_value;
+	break;
+	case PARAM_PID_POS_P:
+	case PARAM_PID_POS_I:
+	case PARAM_PID_POS_D:
+	case PARAM_PID_CURR_P:
+	case PARAM_PID_CURR_I:
+	case PARAM_PID_CURR_D:
+		temp->pid_coeff = new_value;
+	break;
+	case PARAM_DRIVER_MODE:
+		temp->driver_mode = new_value;
+	break;
+	default:
+		std::cout << "[error] HI_moxa::set_parameter() invalid parameter" << std::endl;
+		return -1;
+	break;
+	}
+
+
+	for(int param_set_attempt = 0; param_set_attempt < MAX_PARAM_SET_ATTEMPTS; param_set_attempt++)
+	{
+		write(fd[drive_number], tx_buf, WRITE_BYTES);
+		bytes_received = 0;
+
+		FD_ZERO(&rfds);
+		FD_SET(fd[drive_number], &rfds);
+
+		for(int i=0; i<3; i++)
+		{
+			struct timeval timeout;
+			timeout.tv_sec = (time_t) 0;
+			timeout.tv_usec = 500;
+			int select_retval = select(fd[drive_number] + 1, &rfds, NULL, NULL, &timeout);
+			if (select_retval == 0) {
+				std::cout << "[error] param set ack timeout for drive (" << drive_offset << ")" << std::endl;
+			} else {
+				bytes_received += read(fd[drive_number], rx_buf + bytes_received, READ_BYTES - bytes_received);
+
+				if(bytes_received == READ_BYTES)
+					return 0;
+			}
+		}
+		usleep(2000);
+	}
+	return 1;
 }
 
 void HI_moxa::reset_counters(void)
@@ -340,11 +409,16 @@ void HI_moxa::start_synchro(int drive_offset)
 
 void HI_moxa::finish_synchro(int drive_offset)
 {
-	servo_data[first_drive_number + drive_offset].command_params &= 0;
+	servo_data[first_drive_number + drive_offset].command_params &= ~COMMAND_PARAM_SYNCHRO;
 
 	//#ifdef T_INFO_FUNC
 	std::cout << "[func] HI_moxa::finish_synchro(" << drive_offset << ")" << std::endl;
 	//#endif
+}
+
+void HI_moxa::set_command_param(int drive_offset, uint8_t param)
+{
+	servo_data[first_drive_number + drive_offset].command_params |= param;
 }
 
 bool HI_moxa::is_impulse_zero(int drive_offset)
