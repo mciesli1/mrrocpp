@@ -288,7 +288,7 @@ MESSAGE_T fradia_sensor <CONFIGURE_T, READING_T, INITIATE_T>::receive_from_fradi
 		throw std::runtime_error("read() failed: result != sizeof(MESSAGE_T)");
 	}
 
-	//	logger::log_dbg("fradia_sensor::receive_from_fradia() end\n");
+	logger::log_dbg("fradia_sensor::receive_from_fradia(): %d\n", result);
 
 	return message;
 }
@@ -373,7 +373,7 @@ void fradia_sensor <CONFIGURE_T, READING_T, INITIATE_T>::get_reading()
 		tv.tv_sec = tv.tv_usec = 0;
 
 		int result = select(sockfd + 1, &rfds, NULL, NULL, &tv);
-		//logger::log_dbg("fradia_sensor::get_reading(): select(): %d\n", result);
+		logger::log_dbg("fradia_sensor::get_reading(): select(): %d\n", result);
 		if (result == -1) {
 			throw std::runtime_error(std::string("select() failed: ") + strerror(errno));
 		}
